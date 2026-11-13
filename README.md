@@ -20,7 +20,7 @@ Claude deploys a debug build of FTP Files to the phone, then shares the
 app's TestFlight notes for editing in Safari and applies the edit to the
 file. The waits for the build and for Claude are sped up.
 
-<!-- drop the GIF here -->
+<img width="360" height="778" alt="remote-xcode-demo-360" src="https://github.com/user-attachments/assets/febf2123-c6c5-491c-856e-1806015082b7" />
 
 ## deploy-ipa
 
