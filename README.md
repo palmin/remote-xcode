@@ -1,19 +1,22 @@
 # remote-xcode
 
 Claude Code plugins for working on your Xcode projects from the Claude app on
-your phone, while Claude runs on your Mac through Remote Control.
+your phone while you are away from your Mac, with Claude running on the Mac
+through Remote Control. On the same Wi-Fi, Xcode already installs and debugs
+over the network; these work when the phone is anywhere else, on mobile data
+or another network.
 
 - **deploy-ipa** puts debug builds of your iOS apps on your iPhone without
-  TestFlight or a cable, and lets Claude read their console output wherever
-  the phone is.
+  TestFlight, a cable or a shared network, and lets Claude read their console
+  output wherever the phone is.
 - **edit-link** lets you edit a file of your project by hand on the phone,
   such as release notes or a config file, and brings what you save back
   into the file.
 
-Both keep everything in a private bucket of your own, on AWS S3 or another
-S3 service with presigned links, and can share one bucket and key. Nothing is
-added to your Xcode projects, and nothing runs on anyone's server but your
-own bucket.
+Both go through a private bucket of your own, which the Mac and the phone
+can each reach from anywhere: AWS S3 or another S3 service with presigned
+links. Nothing is added to your Xcode projects, and nothing runs on anyone's
+server but your own bucket.
 
 In this recording, the Claude app on an iPhone drives Claude Code on a Mac.
 Claude deploys a debug build of FTP Files to the phone, then shares the
