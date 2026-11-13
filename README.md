@@ -167,25 +167,6 @@ points out in code and config files rather than keeping silently.
   builds run one at a time, since schemes share DerivedData.
 - edit-link edits UTF-8 text files up to 2 MB.
 
-## Files
-
-| File | Purpose |
-|---|---|
-| `.claude-plugin/marketplace.json` | lists both plugins for `/plugin marketplace add` |
-| `iam-policy.json` | the permissions the IAM user needs, per plugin |
-| `plugins/deploy-ipa/skills/deploy-ipa/SKILL.md` | tells Claude how to deploy, show the link and read console output |
-| `plugins/deploy-ipa/skills/deploy-ipa/deploy-ipa` | archives, packages, uploads and prints the links |
-| `plugins/deploy-ipa/skills/deploy-ipa/deploy-ipa-console` | prints or follows what a console build uploaded |
-| `plugins/deploy-ipa/skills/deploy-ipa/build-console-object` | compiles `RemoteConsole.m` with an upload policy |
-| `plugins/deploy-ipa/skills/deploy-ipa/upload-policy` | signs the S3 POST policy for console uploads |
-| `plugins/deploy-ipa/skills/deploy-ipa/RemoteConsole.m` | captures stdout, stderr, `NSLog` and `Logger` lines and uploads them |
-| `plugins/deploy-ipa/skills/deploy-ipa/aws-credentials` | reads the AWS keys from the Keychain for the `aws` CLI |
-| `plugins/deploy-ipa/skills/deploy-ipa/setup` | sets deploy-ipa up and checks it |
-| `plugins/edit-link/skills/edit-link/SKILL.md` | tells Claude how to share a file, wait for saves and apply them |
-| `plugins/edit-link/skills/edit-link/edit-link` | shares, fetches, merges and stops sharing; checks the setup |
-| `plugins/edit-link/skills/edit-link/editor.html` | the editor page, uploaded next to each shared file |
-| `plugins/edit-link/skills/edit-link/setup` | sets edit-link up and checks it |
-
 ## About me
 
 I'm [Anders Borum](https://mastodon.social/@palmin), making developer
