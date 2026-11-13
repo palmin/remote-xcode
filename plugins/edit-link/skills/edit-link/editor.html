@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex">
+  <title>Edit</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    :root {
+      --text: #111827;
+      --muted: #6b7280;
+      --background: #ffffff;
+      --field: #ffffff;
+      --border: #d1d5db;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --disabled: #9ca3af;
+      --saved: #059669;
+      --modified: #d97706;
+      --error: #dc2626;
+      --info-background: #dbeafe;
+      --info-text: #1e40af;
+      --info-border: #bfdbfe;
+      --merged-background: #fef3c7;
+      --merged-text: #92400e;
+      --merged-border: #fde68a;
+      --error-background: #fee2e2;
+      --error-text: #991b1b;
+      --error-border: #fecaca;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --text: #f3f4f6;
+        --muted: #9ca3af;
+        --background: #111827;
+        --field: #1f2937;
+        --border: #374151;
+        --disabled: #4b5563;
+        --saved: #34d399;
+        --modified: #fbbf24;
+        --error: #f87171;
+        --info-background: #172554;
+        --info-text: #bfdbfe;
+        --info-border: #1e40af;
+        --merged-background: #451a03;
+        --merged-text: #fde68a;
+        --merged-border: #92400e;
+        --error-background: #450a0a;
+        --error-text: #fecaca;
+        --error-border: #991b1b;
+      }
+    }
+
+    html, body {
+      height: 100%;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      line-height: 1.5;
+      color: var(--text);
+      background: var(--background);
+      display: flex;
+      flex-direction: column;
+      padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
+               max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+    }
+
+    .container {
+      max-width: 900px;
+      width: 100%;
+      margin: 0 auto;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      overflow-wrap: anywhere;
+    }
+
+    .expires {
+      color: var(--muted);
+      font-size: 0.875rem;
+      margin-bottom: 1rem;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    .save-button {
+      padding: 0.6rem 1.5rem;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font: inherit;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .save-button:hover {
+      background: var(--accent-hover);
+    }
+
+    .save-button:disabled {
+      background: var(--disabled);
+      cursor: not-allowed;
+    }
+
+    .state {
+      font-size: 0.875rem;
+      color: var(--muted);
+    }
+
+    .state.modified {
+      color: var(--modified);
+      font-weight: 500;
+    }
+
+    .state.saving {
+      color: var(--accent);
+    }
+
+    .state.saved {
+      color: var(--saved);
+      font-weight: 500;
+    }
+
+    .state.error {
+      color: var(--error);
+      font-weight: 500;
+    }
+
+    #message {
+      display: none;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      margin-bottom: 0.75rem;
+      font-size: 0.95rem;
+      font-weight: 500;
+    }
+
+    #message.info {
+      display: block;
+      background: var(--info-background);
+      color: var(--info-text);
+      border: 1px solid var(--info-border);
+    }
+
+    #message.merged {
+      display: block;
+      background: var(--merged-background);
+      color: var(--merged-text);
+      border: 1px solid var(--merged-border);
+    }
+
+    #message.error {
+      display: block;
+      background: var(--error-background);
+      color: var(--error-text);
+      border: 1px solid var(--error-border);
+    }
+
+    .loading {
+      color: var(--muted);
+      padding: 3rem 0;
+      text-align: center;
+    }
+
+    /* 16px keeps iOS Safari from zooming in when the text area gets focus */
+    #editor {
+      width: 100%;
+      flex: 1;
+      min-height: 60vh;
+      font-family: ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+      font-size: 16px;
+      line-height: 1.5;
+      padding: 0.75rem;
+      color: var(--text);
+      background: var(--field);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      resize: vertical;
+      tab-size: 4;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    #editor:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+    }
+
+    @media (min-width: 641px) {
+      #editor {
+        font-size: 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 id="name"></h1>
+    <p class="expires" id="expires"></p>
+
+    <div class="toolbar">
+      <button class="save-button" id="saveButton" onclick="save()" disabled>Save</button>
+      <span class="state" id="state">Loading…</span>
+    </div>
+
+    <div id="message" role="status"></div>
+
+    <div class="loading" id="loading">Loading file…</div>
+    <textarea id="editor" hidden spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
+  </div>
+
+  <script>
+    // edit-link writes in the file's name and presigned PUT and GET links for it
+    const SHARE = __SHARE__;
+    const POLL_INTERVAL = 5000;
+
+    const editor = document.getElementById('editor');
+    const saveButton = document.getElementById('saveButton');
+    const stateLabel = document.getElementById('state');
+    const message = document.getElementById('message');
+
+    // the file as on S3 when this page last loaded or saved it, the base of merges
+    let savedContent = null;
+    let serverETag = null;
+    // a newer version seen while there were unsaved changes, so it is not downloaded again
+    let polledETag = null;
+    let lastSaved = null;
+    let saving = false;
+    let expired = false;
+
+    document.title = `Edit ${SHARE.name}`;
+    document.getElementById('name').textContent = SHARE.name;
+    document.getElementById('expires').textContent = `Link expires ${expiry().toLocaleString()}`;
+
+    function expiry() {
+      const params = new URL(SHARE.put).searchParams;
+      const date = params.get('X-Amz-Date');
+      const seconds = parseInt(params.get('X-Amz-Expires'), 10);
+      const start = Date.UTC(
+        parseInt(date.slice(0, 4), 10), parseInt(date.slice(4, 6), 10) - 1, parseInt(date.slice(6, 8), 10),
+        parseInt(date.slice(9, 11), 10), parseInt(date.slice(11, 13), 10), parseInt(date.slice(13, 15), 10));
+      return new Date(start + seconds * 1000);
+    }
+
+    // a text area only ever holds LF line endings
+    function normalize(text) {
+      return text.replace(/\r\n?/g, '\n');
+    }
+
+    function clock() {
+      return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function isDirty() {
+      return savedContent !== null && editor.value !== savedContent;
+    }
+
+    function setState(text, kind) {
+      stateLabel.textContent = text;
+      stateLabel.className = kind ? `state ${kind}` : 'state';
+    }
+
+    function updateState() {
+      if (saving || savedContent === null) return;
+      if (isDirty()) {
+        setState('Unsaved changes', 'modified');
+      } else if (lastSaved) {
+        setState(`Saved ${lastSaved}`, 'saved');
+      } else {
+        setState('No changes');
+      }
+    }
+
+    function showMessage(text, kind) {
+      message.textContent = text;
+      message.className = kind;
+    }
+
+    function clearMessage() {
+      message.textContent = '';
+      message.className = '';
+    }
+
+    // Code and Message from an S3 XML error body, or the body itself
+    function describeS3Error(body) {
+      if (!body) return '';
+      const code = body.match(/<Code>([^<]+)<\/Code>/);
+      const text = body.match(/<Message>([^<]+)<\/Message>/);
+      if (code || text) {
+        return [code && code[1], text && text[1]].filter(Boolean).join(': ');
+      }
+      const trimmed = body.trim();
+      return trimmed.length > 500 ? trimmed.slice(0, 500) + '…' : trimmed;
+    }
+
+    async function failure(response, action) {
+      if (response.status === 403 && new Date() > expiry()) {
+        expired = true;
+        saveButton.disabled = true;
+        return new Error('This link has expired, so the file can no longer be loaded or saved. Ask for a new link.');
+      }
+      const detail = describeS3Error(await response.text());
+      return new Error([`${action} failed`, `HTTP ${response.status}`, detail].filter(Boolean).join(' · '));
+    }
+
+    // the file on S3, or null while it still has the ETag given
+    async function fetchServer(ifNoneMatch) {
+      const headers = ifNoneMatch ? { 'If-None-Match': ifNoneMatch } : {};
+      const response = await fetch(SHARE.get, { cache: 'no-store', headers });
+      if (response.status === 304) return null;
+      if (!response.ok) throw await failure(response, 'Loading');
+      return { text: normalize(await response.text()), etag: response.headers.get('ETag') };
+    }
+
+    async function load() {
+      try {
+        const server = await fetchServer(null);
+        savedContent = server.text;
+        serverETag = server.etag;
+        editor.value = server.text;
+        editor.hidden = false;
+        saveButton.disabled = false;
+        setState('Loaded');
+      } catch (e) {
+        setState('Not loaded', 'error');
+        showMessage(e.message, 'error');
+      }
+      document.getElementById('loading').hidden = true;
+    }
+
+    async function save() {
+      if (saving || savedContent === null || expired) return;
+      saving = true;
+      saveButton.disabled = true;
+      setState('Saving…', 'saving');
+
+      const content = editor.value;
+      let error = null;
+      try {
+        // ask first whether the file changed since this page has it, so changes saved elsewhere are merged rather than lost
+        const server = await fetchServer(serverETag);
+        if (server && server.text !== savedContent) {
+          mergeServerChanges(server);
+        } else {
+          if (server) serverETag = server.etag;
+          const response = await put(content, serverETag);
+          if (response.status === 412) {
+            mergeServerChanges(await fetchServer(null));
+          } else if (response.ok) {
+            savedContent = content;
+            serverETag = response.headers.get('ETag');
+            polledETag = null;
+            lastSaved = clock();
+            clearMessage();
+          } else {
+            throw await failure(response, 'Saving');
+          }
+        }
+      } catch (e) {
+        error = e;
+      }
+
+      saving = false;
+      saveButton.disabled = expired;
+      if (error) {
+        setState('Save failed', 'error');
+        showMessage(error.message, 'error');
+      } else {
+        updateState();
+      }
+    }
+
+    // If-Match also closes the moment between that check and the save where the service supports it,
+    // and one answering 501 Not Implemented gets a plain save
+    async function put(content, etag) {
+      const headers = { 'Content-Type': 'text/plain; charset=utf-8' };
+      if (etag) {
+        const response = await fetch(SHARE.put, {
+          method: 'PUT', headers: { ...headers, 'If-Match': etag }, body: content, cache: 'no-store' });
+        if (response.status !== 501) return response;
+      }
+      return fetch(SHARE.put, { method: 'PUT', headers, body: content, cache: 'no-store' });
+    }
+
+    // the file changed on S3 since this page loaded it: merge line by line and let the user review
+    function mergeServerChanges(server) {
+      const result = diff3(savedContent, editor.value, server.text);
+      savedContent = server.text;
+      serverETag = server.etag;
+      polledETag = null;
+      editor.value = result.merged;
+      if (result.hasConflicts) {
+        showMessage('The file was changed elsewhere in the same lines as yours. Resolve the marked conflicts, then save again.', 'merged');
+      } else {
+        showMessage('The file was changed elsewhere, and both changes are merged. Review them, then save again.', 'merged');
+      }
+    }
+
+    // pick up versions saved elsewhere, such as from the Mac, while this page is open
+    async function poll() {
+      if (saving || expired || savedContent === null || document.visibilityState !== 'visible') return;
+      let server;
+      try {
+        server = await fetchServer(polledETag || serverETag);
+      } catch (e) {
+        return;
+      }
+      if (!server || saving) return;
+
+      if (server.text === savedContent) {
+        serverETag = server.etag;
+        polledETag = null;
+      } else if (!isDirty()) {
+        const position = editor.selectionStart;
+        const scroll = editor.scrollTop;
+        editor.value = server.text;
+        editor.selectionStart = editor.selectionEnd = Math.min(position, server.text.length);
+        editor.scrollTop = scroll;
+        savedContent = server.text;
+        serverETag = server.etag;
+        polledETag = null;
+        lastSaved = null;
+        showMessage(`Updated at ${clock()} with a version saved elsewhere.`, 'info');
+        updateState();
+      } else {
+        polledETag = server.etag;
+        showMessage('The file was changed elsewhere. Saving merges those changes with yours.', 'merged');
+      }
+    }
+
+    editor.addEventListener('input', updateState);
+
+    editor.addEventListener('keydown', function(e) {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = this.selectionStart;
+        const end = this.selectionEnd;
+        const value = this.value;
+
+        if (e.shiftKey) {
+          // outdent the current line by a tab or four spaces
+          const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+          if (start === end) {
+            if (value[lineStart] === '\t') {
+              this.value = value.substring(0, lineStart) + value.substring(lineStart + 1);
+              this.selectionStart = this.selectionEnd = Math.max(lineStart, start - 1);
+            } else if (value.substring(lineStart, lineStart + 4) === '    ') {
+              this.value = value.substring(0, lineStart) + value.substring(lineStart + 4);
+              this.selectionStart = this.selectionEnd = Math.max(lineStart, start - 4);
+            }
+          }
+        } else {
+          this.value = value.substring(0, start) + '\t' + value.substring(end);
+          this.selectionStart = this.selectionEnd = start + 1;
+        }
+        this.dispatchEvent(new Event('input'));
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        save();
+      }
+    });
+
+    window.addEventListener('beforeunload', function(e) {
+      if (isDirty()) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
+
+    function computeLCS(a, b) {
+      const n = a.length;
+      const m = b.length;
+      // DP table stored in a flat Uint32Array
+      const dp = new Uint32Array((n + 1) * (m + 1));
+      const w = m + 1;
+      for (let i = n - 1; i >= 0; i--) {
+        for (let j = m - 1; j >= 0; j--) {
+          if (a[i] === b[j]) {
+            dp[i * w + j] = dp[(i + 1) * w + (j + 1)] + 1;
+          } else {
+            dp[i * w + j] = Math.max(dp[(i + 1) * w + j], dp[i * w + (j + 1)]);
+          }
+        }
+      }
+      // backtrack to find matched pairs
+      const pairs = [];
+      let i = 0, j = 0;
+      while (i < n && j < m) {
+        if (a[i] === b[j]) {
+          pairs.push([i, j]);
+          i++; j++;
+        } else if (dp[(i + 1) * w + j] >= dp[i * w + (j + 1)]) {
+          i++;
+        } else {
+          j++;
+        }
+      }
+      return pairs;
+    }
+
+    function diff3(base, ours, theirs) {
+      if (ours === theirs || theirs === base) return { merged: ours, hasConflicts: false };
+      if (ours === base) return { merged: theirs, hasConflicts: false };
+
+      const baseLines = base.split('\n');
+      const ourLines = ours.split('\n');
+      const theirLines = theirs.split('\n');
+
+      // the line tables would take too much memory on a phone, so one conflict for the whole file
+      const cells = (baseLines.length + 1) * (Math.max(ourLines.length, theirLines.length) + 1);
+      if (cells > 10000000) {
+        const merged = ['<<<<<<< Your changes', ours, '=======', theirs, '>>>>>>> Saved elsewhere'].join('\n');
+        return { merged, hasConflicts: true };
+      }
+
+      const lcsBaseOurs = computeLCS(baseLines, ourLines);
+      const lcsBaseTheirs = computeLCS(baseLines, theirLines);
+
+      // build maps: base index -> ours/theirs index
+      const baseToOurs = new Map();
+      for (const [bi, oi] of lcsBaseOurs) baseToOurs.set(bi, oi);
+      const baseToTheirs = new Map();
+      for (const [bi, ti] of lcsBaseTheirs) baseToTheirs.set(bi, ti);
+
+      // stable anchors: base lines matched by both sides
+      const anchors = [];
+      for (let bi = 0; bi < baseLines.length; bi++) {
+        if (baseToOurs.has(bi) && baseToTheirs.has(bi)) {
+          anchors.push({ base: bi, ours: baseToOurs.get(bi), theirs: baseToTheirs.get(bi) });
+        }
+      }
+
+      // add sentinel anchors at the end
+      anchors.push({ base: baseLines.length, ours: ourLines.length, theirs: theirLines.length });
+
+      const result = [];
+      let hasConflicts = false;
+      let prevBase = 0, prevOurs = 0, prevTheirs = 0;
+
+      for (const anchor of anchors) {
+        // gap before this anchor
+        const baseGap = baseLines.slice(prevBase, anchor.base);
+        const oursGap = ourLines.slice(prevOurs, anchor.ours);
+        const theirsGap = theirLines.slice(prevTheirs, anchor.theirs);
+
+        const baseStr = baseGap.join('\n');
+        const oursStr = oursGap.join('\n');
+        const theirsStr = theirsGap.join('\n');
+
+        if (oursStr === theirsStr) {
+          // both sides agree (or neither changed)
+          if (oursGap.length > 0) result.push(...oursGap);
+        } else if (oursStr === baseStr) {
+          // only theirs changed
+          if (theirsGap.length > 0) result.push(...theirsGap);
+        } else if (theirsStr === baseStr) {
+          // only ours changed
+          if (oursGap.length > 0) result.push(...oursGap);
+        } else {
+          // true conflict
+          hasConflicts = true;
+          result.push('<<<<<<< Your changes');
+          result.push(...oursGap);
+          result.push('=======');
+          result.push(...theirsGap);
+          result.push('>>>>>>> Saved elsewhere');
+        }
+
+        // emit the anchor line itself (if not sentinel)
+        if (anchor.base < baseLines.length) {
+          result.push(baseLines[anchor.base]);
+        }
+
+        prevBase = anchor.base + 1;
+        prevOurs = anchor.ours + 1;
+        prevTheirs = anchor.theirs + 1;
+      }
+
+      return { merged: result.join('\n'), hasConflicts };
+    }
+
+    load();
+    setInterval(poll, POLL_INTERVAL);
+    document.addEventListener('visibilitychange', poll);
+  </script>
+</body>
+</html>

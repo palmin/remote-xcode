@@ -1,0 +1,153 @@
+#!/bin/bash
+set -euo pipefail
+#
+# Set up edit-link on this Mac, or check an existing setup.
+#
+# Usage: setup           asks for the bucket and its keys, then checks them
+#        setup --check   only runs the checks, asking nothing
+#
+# Run it in your own Terminal: keys are typed there, straight into the login Keychain (service
+# edit-link), and never pass through Claude. With deploy-ipa set up, it offers to use its keys
+# and bucket instead. Any S3 service with presigned links works; the endpoint stays empty for
+# AWS. It writes the settings to ~/.config/edit-link.env (or EDIT_LINK_ENV).
+#
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="${EDIT_LINK_ENV:-$HOME/.config/edit-link.env}"
+DEPLOY_IPA_FILE="${DEPLOY_IPA_ENV:-$HOME/.config/deploy-ipa.env}"
+POLICY=https://github.com/palmin/remote-xcode/blob/main/iam-policy.json
+FAILURES=0
+
+ok() { echo "  ok    $*"; }
+bad() { echo "  FAIL  $*"; FAILURES=$((FAILURES + 1)); }
+
+# ask <variable> <question> [default]
+ask() {
+    local answer=""
+    if [ -n "${3:-}" ]; then
+        read -r -p "$2 [$3]: " answer || true
+    else
+        read -r -p "$2: " answer || true
+    fi
+    printf -v "$1" '%s' "${answer:-${3:-}}"
+}
+
+# offer to store or replace a Keychain item, typed into security's own prompt
+keychain_store() {
+    local replace=y
+    if security find-generic-password -s edit-link -a "$1" >/dev/null 2>&1; then
+        ask replace "  $2 is already in the Keychain; replace it? (y/n)" n
+    fi
+    if [ "$replace" = y ]; then
+        echo "  Type the $2 at the prompt; it goes in the Keychain as edit-link / $1."
+        security add-generic-password -U -s edit-link -a "$1" -w
+    fi
+}
+
+# single quoted for the env file
+quoted() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+check() {
+    echo "Tools:"
+    local tool
+    for tool in python3 git security curl; do
+        if command -v "$tool" >/dev/null; then ok "$tool"; else bad "$tool is missing"; fi
+    done
+    if [ ! -f "$ENV_FILE" ]; then
+        echo "Settings in $ENV_FILE:"
+        bad "missing; run $HERE/setup"
+        return
+    fi
+    # the S3 checks sign their requests the way sharing does, so they run in edit-link itself
+    if ! "$HERE/edit-link" check; then
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+interactive() {
+    EDIT_LINK_KEYCHAIN="" EDIT_LINK_BUCKET="" EDIT_LINK_REGION="" EDIT_LINK_ENDPOINT=""
+    EDIT_LINK_PREFIX="" EDIT_LINK_EXPIRES=""
+    if [ -f "$ENV_FILE" ]; then
+        source "$ENV_FILE"
+    fi
+    echo "edit-link setup. Press return to keep the value in brackets."
+    echo
+
+    local reuse=n
+    DEPLOY_IPA_PROFILE="" DEPLOY_IPA_BUCKET=""
+    if [ -f "$DEPLOY_IPA_FILE" ]; then
+        source "$DEPLOY_IPA_FILE"
+    fi
+    if [ -n "$DEPLOY_IPA_PROFILE" ] && [ -n "$DEPLOY_IPA_BUCKET" ] && command -v aws >/dev/null; then
+        local default=n
+        if [ -z "$EDIT_LINK_KEYCHAIN" ] || [ "$EDIT_LINK_KEYCHAIN" = deploy-ipa ]; then
+            default=y
+        fi
+        ask reuse "Use the keys and bucket $DEPLOY_IPA_BUCKET of deploy-ipa? (y/n)" "$default"
+    fi
+
+    if [ "$reuse" = y ]; then
+        EDIT_LINK_KEYCHAIN=deploy-ipa
+        EDIT_LINK_BUCKET=$DEPLOY_IPA_BUCKET
+        EDIT_LINK_REGION=$(aws --profile "$DEPLOY_IPA_PROFILE" configure get region 2>/dev/null || true)
+        EDIT_LINK_ENDPOINT=$(aws --profile "$DEPLOY_IPA_PROFILE" configure get endpoint_url 2>/dev/null || true)
+        echo "On AWS, its IAM user also needs the EditLink statements of $POLICY"
+    else
+        EDIT_LINK_KEYCHAIN=edit-link
+        echo "Keys that may use your bucket (on AWS, of an IAM user limited by $POLICY):"
+        keychain_store access-key-id "access key id"
+        keychain_store secret-access-key "secret access key"
+        echo
+        ask EDIT_LINK_BUCKET "Bucket, with public access blocked" "${EDIT_LINK_BUCKET:-}"
+        echo "Leave the endpoint empty for AWS. For another S3 service, give its URL,"
+        echo "such as https://<account>.r2.cloudflarestorage.com or https://s3.<region>.backblazeb2.com."
+        ask EDIT_LINK_ENDPOINT "Endpoint" "${EDIT_LINK_ENDPOINT:-}"
+        if [ -z "$EDIT_LINK_ENDPOINT" ]; then
+            # AWS names the region of a bucket to anyone asking, which signed links need
+            EDIT_LINK_REGION=$(curl -sI "https://$EDIT_LINK_BUCKET.s3.amazonaws.com/" | tr -d '\r' \
+                | sed -n 's/^x-amz-bucket-region: //Ip')
+            if [ -n "$EDIT_LINK_REGION" ]; then
+                echo "The bucket is in $EDIT_LINK_REGION."
+            fi
+        fi
+    fi
+    if [ -z "$EDIT_LINK_REGION" ]; then
+        ask EDIT_LINK_REGION "Region, such as auto for Cloudflare R2" "us-east-1"
+    fi
+
+    echo "Shares nothing was saved to for the link lifetime get deleted from the prefix, so use it for nothing else."
+    ask EDIT_LINK_PREFIX "Key prefix" "${EDIT_LINK_PREFIX:-edit-link}"
+
+    mkdir -p "$(dirname "$ENV_FILE")"
+    if [ -f "$ENV_FILE" ]; then
+        cp "$ENV_FILE" "$ENV_FILE.bak"
+    fi
+    {
+        echo "# edit-link settings, written by setup; the keys are in the Keychain"
+        echo "EDIT_LINK_KEYCHAIN=$(quoted "$EDIT_LINK_KEYCHAIN")"
+        echo "EDIT_LINK_BUCKET=$(quoted "$EDIT_LINK_BUCKET")"
+        echo "EDIT_LINK_REGION=$(quoted "$EDIT_LINK_REGION")"
+        echo "# empty for AWS, otherwise the service's URL, addressed path-style"
+        echo "EDIT_LINK_ENDPOINT=$(quoted "$EDIT_LINK_ENDPOINT")"
+        echo "EDIT_LINK_PREFIX=$(quoted "$EDIT_LINK_PREFIX")"
+        echo "# signed links last this many seconds (7 days is the SigV4 maximum)"
+        echo "EDIT_LINK_EXPIRES=${EDIT_LINK_EXPIRES:-604800}"
+    } > "$ENV_FILE"
+    echo "Wrote $ENV_FILE."
+    echo
+}
+
+case "${1:-}" in
+    --check) ;;
+    "") interactive ;;
+    *) echo "Usage: $0 [--check]" >&2; exit 1 ;;
+esac
+
+check
+echo
+if [ "$FAILURES" -eq 0 ]; then
+    echo "All checks passed."
+else
+    echo "$FAILURES check(s) failed."
+    exit 1
+fi

@@ -22,9 +22,11 @@ fi
 source "$ENV_FILE"
 : "${DEPLOY_IPA_PROFILE:?}" "${DEPLOY_IPA_BUCKET:?}" "${DEPLOY_IPA_EXPIRES:=604800}"
 
-export CREDENTIALS REGION BUCKET="$DEPLOY_IPA_BUCKET" PREFIX="$1" EXPIRES="$DEPLOY_IPA_EXPIRES"
+export CREDENTIALS REGION ENDPOINT BUCKET="$DEPLOY_IPA_BUCKET" PREFIX="$1" EXPIRES="$DEPLOY_IPA_EXPIRES"
 CREDENTIALS=$(aws --profile "$DEPLOY_IPA_PROFILE" configure export-credentials --format process)
 REGION=$(aws --profile "$DEPLOY_IPA_PROFILE" configure get region)
+# empty for AWS; another S3 service is addressed path-style, as the profile's s3 settings say
+ENDPOINT=$(aws --profile "$DEPLOY_IPA_PROFILE" configure get endpoint_url || true)
 python3 -I -c '
 import base64, datetime, hashlib, hmac, json, os
 
@@ -52,6 +54,8 @@ for part in (day, region, "s3", "aws4_request"):
     key = hmac.new(key, part.encode(), hashlib.sha256).digest()
 fields["x-amz-signature"] = hmac.new(key, fields["policy"].encode(), hashlib.sha256).hexdigest()
 
-config = {"url": f"https://{bucket}.s3.{region}.amazonaws.com/", "prefix": prefix, "fields": fields}
+endpoint = os.environ["ENDPOINT"].rstrip("/")
+url = f"{endpoint}/{bucket}/" if endpoint else f"https://{bucket}.s3.{region}.amazonaws.com/"
+config = {"url": url, "prefix": prefix, "fields": fields}
 print(base64.b64encode(json.dumps(config).encode()).decode())
 '

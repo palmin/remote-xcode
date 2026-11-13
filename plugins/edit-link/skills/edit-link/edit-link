@@ -1,0 +1,661 @@
+#!/usr/bin/env -S python3 -I
+#
+# Share a local text file for editing in a browser: upload it to S3 next to an editor page
+# that saves back to it through presigned links, and fetch what was saved there.
+#
+# Usage: edit-link share <file>
+#        edit-link fetch [--wait] [--timeout <seconds>] <file>
+#        edit-link status [<file>]
+#        edit-link stop [--discard] <file>
+#        edit-link check
+#
+# share uploads the file and its editor page and prints NAME, EXPIRES and PAGE_URL. On a file
+# already shared it uploads the current content and renews the link, but refuses (exit 3)
+# while edits saved from the page are not fetched and applied yet. fetch prints the diff from
+# the file to its edited version, then CHANGED, CONFLICTS and INCOMING, the whole edited
+# version; --wait first waits for a save from the page (exit 2 when none comes in time).
+# check tests the setup the way the rest uses it, for setup --check.
+# Settings come from ~/.config/edit-link.env (or EDIT_LINK_ENV), written by setup, and the
+# keys from the login Keychain item it names, or from EDIT_LINK_ACCESS_KEY_ID and
+# EDIT_LINK_SECRET_ACCESS_KEY. Any S3 service with presigned links works: AWS unless
+# EDIT_LINK_ENDPOINT names another, which is then addressed path-style.
+#
+
+import argparse
+import datetime
+import difflib
+import email.utils
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ElementTree
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SETTINGS = Path(os.environ.get("EDIT_LINK_ENV") or Path.home() / ".config" / "edit-link.env")
+STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "edit-link"
+MAX_SIZE = 2 << 20
+MAX_EXPIRES = 604800
+POLL_SECONDS = 3
+DIFF_LINES = 400
+XML = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+
+
+class S3Error(Exception):
+    def __init__(self, message, status):
+        super().__init__(message)
+        self.status = status
+
+
+def fail(message, status=1):
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(status)
+
+
+def read_settings():
+    if not SETTINGS.exists():
+        fail(f"{SETTINGS} is missing; run {HERE / 'setup'} first")
+    values = {}
+    for line in SETTINGS.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            name, value = line.split("=", 1)
+            values[name.strip()] = value.strip().strip("\"'")
+    for name in ("EDIT_LINK_BUCKET", "EDIT_LINK_REGION", "EDIT_LINK_PREFIX"):
+        if not values.get(name):
+            fail(f"{name} is missing from {SETTINGS}; run {HERE / 'setup'}")
+    return values
+
+
+def keychain(service, account):
+    result = subprocess.run(["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        fail(f"the {account} is not in the login Keychain as {service} / {account}; run {HERE / 'setup'}")
+    return result.stdout.strip()
+
+
+class S3:
+    """signs every request as a presigned URL, so the same code makes the links for the page"""
+
+    def __init__(self):
+        settings = read_settings()
+        self.bucket = settings["EDIT_LINK_BUCKET"]
+        self.region = settings["EDIT_LINK_REGION"]
+        self.prefix = settings["EDIT_LINK_PREFIX"].strip("/")
+        self.expires = min(int(settings.get("EDIT_LINK_EXPIRES") or MAX_EXPIRES), MAX_EXPIRES)
+        service = settings.get("EDIT_LINK_KEYCHAIN") or "edit-link"
+        self.access_key = os.environ.get("EDIT_LINK_ACCESS_KEY_ID") or keychain(service, "access-key-id")
+        self.secret_key = os.environ.get("EDIT_LINK_SECRET_ACCESS_KEY") or keychain(service, "secret-access-key")
+        endpoint = settings.get("EDIT_LINK_ENDPOINT", "").rstrip("/")
+        if endpoint:
+            # every S3 service takes path-style requests, while not all have the bucket as host name
+            parts = urllib.parse.urlsplit(endpoint)
+            self.origin = f"{parts.scheme}://{parts.netloc}"
+            self.host = parts.netloc
+            self.root = f"/{self.bucket}/"
+        else:
+            self.host = f"{self.bucket}.s3.{self.region}.amazonaws.com"
+            self.origin = f"https://{self.host}"
+            self.root = "/"
+
+    def url(self, method, key="", query=None, expires=None):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        day = now.strftime("%Y%m%d")
+        scope = f"{day}/{self.region}/s3/aws4_request"
+        params = dict(query or {})
+        params.update({
+            "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+            "X-Amz-Credential": f"{self.access_key}/{scope}",
+            "X-Amz-Date": now.strftime("%Y%m%dT%H%M%SZ"),
+            "X-Amz-Expires": str(expires or self.expires),
+            "X-Amz-SignedHeaders": "host",
+        })
+
+        def encode(value):
+            return urllib.parse.quote(value, safe="-_.~")
+
+        canonical_query = "&".join(f"{encode(name)}={encode(value)}" for name, value in sorted(params.items()))
+        path = self.root + urllib.parse.quote(key, safe="/-_.~")
+        canonical = "\n".join([method, path, canonical_query, f"host:{self.host}", "", "host", "UNSIGNED-PAYLOAD"])
+        to_sign = "\n".join(["AWS4-HMAC-SHA256", params["X-Amz-Date"], scope,
+                             hashlib.sha256(canonical.encode()).hexdigest()])
+        signing_key = ("AWS4" + self.secret_key).encode()
+        for part in (day, self.region, "s3", "aws4_request"):
+            signing_key = hmac.new(signing_key, part.encode(), hashlib.sha256).digest()
+        signature = hmac.new(signing_key, to_sign.encode(), hashlib.sha256).hexdigest()
+        return f"{self.origin}{path}?{canonical_query}&X-Amz-Signature={signature}"
+
+    def request(self, method, key="", query=None, body=None, headers=None):
+        request = urllib.request.Request(self.url(method, key, query, 900), data=body,
+                                         method=method, headers=headers or {})
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.headers, error.read()
+
+
+def describe(status, body):
+    text = body.decode("utf-8", errors="replace") if body else ""
+    code = re.search(r"<Code>([^<]+)</Code>", text)
+    message = re.search(r"<Message>([^<]+)</Message>", text)
+    details = [match.group(1) for match in (code, message) if match]
+    return ": ".join([f"HTTP {status}", *details])
+
+
+def format_time(seconds):
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(seconds))
+
+
+def digest(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def read_text(path):
+    if not path.is_file():
+        fail(f"{path} is not a file")
+    data = path.read_bytes()
+    if len(data) > MAX_SIZE:
+        fail(f"{path.name} is larger than 2 MB, too large for the editor page")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{path.name} is not UTF-8 text, the only kind the editor page can edit")
+
+
+def uses_crlf(text):
+    return text.count("\r\n") * 2 > text.count("\n")
+
+
+# the page's text area only holds LF, so a CRLF file travels as LF and gets its CRLF back on fetch
+def to_remote(text, crlf):
+    return text.replace("\r\n", "\n") if crlf else text
+
+
+def to_local(text, crlf):
+    text = text.replace("\r\n", "\n")
+    return text.replace("\n", "\r\n") if crlf else text
+
+
+def state_directory(path):
+    return STATE / hashlib.sha256(str(path).encode()).hexdigest()[:16]
+
+
+def load_state(path):
+    file = state_directory(path) / "share.json"
+    return json.loads(file.read_bytes()) if file.exists() else None
+
+
+def save_state(path, state):
+    directory = state_directory(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    temporary = directory / "share.json.tmp"
+    temporary.write_bytes(json.dumps(state, indent=2).encode())
+    temporary.replace(directory / "share.json")
+
+
+# bytes rather than read_text, which would turn CRLF into LF
+def read_state_file(path, name):
+    return (state_directory(path) / name).read_bytes().decode("utf-8")
+
+
+def write_state_file(path, name, text):
+    directory = state_directory(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_bytes(text.encode("utf-8"))
+
+
+def file_marker(path, text):
+    """the file's content and when it was written, which an Edit or Write moves on even when it puts back
+    the content of before, as when undoing fetched edits"""
+    return f"{digest(text)} {path.stat().st_mtime_ns}"
+
+
+def is_unapplied(state, path, text):
+    """whether the edits of the last fetch are still missing from the file, as nothing wrote to it since"""
+    return state.get("unapplied") == file_marker(path, text)
+
+
+def merge(local, base, remote):
+    with tempfile.TemporaryDirectory() as directory:
+        files = []
+        for name, content in (("local", local), ("base", base), ("remote", remote)):
+            file = Path(directory) / name
+            file.write_bytes(content.encode("utf-8"))
+            files.append(str(file))
+        result = subprocess.run(["git", "merge-file", "-p", "-L", "local", "-L", "shared", "-L", "edited", *files],
+                                capture_output=True)
+    if result.returncode > 127:
+        fail(f"git merge-file failed: {result.stderr.decode(errors='replace').strip()}")
+    return result.stdout.decode("utf-8"), result.returncode
+
+
+def print_diff(name, old, new):
+    lines = difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
+                                 f"{name} (now)", f"{name} (edited)")
+    for count, line in enumerate(lines):
+        if count == DIFF_LINES:
+            print("... the diff goes on, read INCOMING for the rest")
+            break
+        print(line.rstrip("\r\n"))
+        if not line.endswith("\n"):
+            print("\\ No newline at end of file")
+
+
+def list_xml(s3, query):
+    status, _, body = s3.request("GET", "", query)
+    if status != 200:
+        fail(f"listing s3://{s3.bucket}/{query.get('prefix', '')} failed: {describe(status, body)}")
+    return ElementTree.fromstring(body)
+
+
+def current_etag(s3, key):
+    """the ETag of the key's current version, or None when there is none. This lists rather than asks
+    for the key, as an IAM policy that limits listing to a prefix makes S3 answer 403 for a missing key"""
+    status, _, body = s3.request("GET", "", {"list-type": "2", "prefix": key, "max-keys": "1"})
+    if status != 200:
+        raise S3Error(f"listing s3://{s3.bucket}/{key} failed: {describe(status, body)}", status)
+    for item in ElementTree.fromstring(body).findall("s3:Contents", XML):
+        if item.findtext("s3:Key", namespaces=XML) == key:
+            return item.findtext("s3:ETag", namespaces=XML)
+    return None
+
+
+def purge(s3, folder):
+    """delete everything in a share's folder; a versioned bucket keeps older versions until its own
+    lifecycle rules remove them, as not every S3 service has versions to delete"""
+    removed = 0
+    query = {"list-type": "2", "prefix": folder + "/"}
+    while True:
+        root = list_xml(s3, query)
+        for item in root.findall("s3:Contents", XML):
+            key = item.findtext("s3:Key", namespaces=XML)
+            status, _, body = s3.request("DELETE", key)
+            if status not in (200, 204):
+                fail(f"deleting {key} failed: {describe(status, body)}")
+            removed += 1
+        token = root.findtext("s3:NextContinuationToken", namespaces=XML)
+        if not token:
+            return removed
+        query["continuation-token"] = token
+
+
+def put(s3, key, body, headers, etag=None):
+    """a PUT that only replaces the version with this ETag where the service takes If-Match; one
+    answering 501 Not Implemented gets a plain PUT, after the check every caller makes first"""
+    if etag:
+        status, response, data = s3.request("PUT", key, body=body, headers={**headers, "If-Match": etag})
+        if status != 501:
+            return status, response, data
+    return s3.request("PUT", key, body=body, headers=headers)
+
+
+def cleanup(s3, keep):
+    """purge shares nothing was saved to for the link lifetime, as their links have expired"""
+    newest = {}
+    query = {"list-type": "2", "prefix": s3.prefix + "/"}
+    while True:
+        root = list_xml(s3, query)
+        for item in root.findall("s3:Contents", XML):
+            folder = item.findtext("s3:Key", namespaces=XML).rsplit("/", 1)[0]
+            stamp = item.findtext("s3:LastModified", namespaces=XML).replace("Z", "+00:00")
+            newest[folder] = max(newest.get(folder, 0), datetime.datetime.fromisoformat(stamp).timestamp())
+        token = root.findtext("s3:NextContinuationToken", namespaces=XML)
+        if not token:
+            break
+        query["continuation-token"] = token
+
+    cutoff = time.time() - s3.expires
+    for folder, modified in list(newest.items()):
+        if folder != keep and modified < cutoff:
+            purge(s3, folder)
+            del newest[folder]
+
+    # forget shares whose copy is gone and whose link has expired, unless they hold unapplied edits
+    for file in STATE.glob("*/share.json"):
+        state = json.loads(file.read_bytes())
+        if state["folder"] not in newest and state["expires"] < time.time() and "unapplied" not in state:
+            shutil.rmtree(file.parent)
+
+
+def share(path):
+    text = read_text(path)
+    s3 = S3()
+    state = load_state(path)
+    base = None
+    if state is not None:
+        etag = current_etag(s3, state["key"])
+        if etag is None:
+            # stopped elsewhere or cleaned up, so start over
+            state = None
+        elif etag != state["etag"]:
+            fail(f"{path.name} was saved from the editor page since the last fetch, and uploading it now "
+                 f"would lose those edits. Run fetch, apply them, then share again.", 3)
+        elif is_unapplied(state, path, text):
+            fail(f"the edits fetched at {format_time(state['fetched'])} are not applied to {path.name} yet, "
+                 f"and uploading it now would undo them. Apply {state_directory(path) / 'incoming'} first.", 3)
+        else:
+            base = read_state_file(path, "base")
+            for name in ("unapplied", "conflicts", "fetched"):
+                state.pop(name, None)
+
+    if state is None:
+        folder = f"{s3.prefix}/{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(6)}"
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", path.name).strip("-.") or "file"
+        state = {"path": str(path), "folder": folder, "key": f"{folder}/{name}", "page": f"{folder}/edit.html",
+                 "crlf": uses_crlf(text), "etag": None}
+
+    if text != base:
+        # refused if the page saved after the check above, where the service takes If-Match
+        status, response, body = put(s3, state["key"], to_remote(text, state["crlf"]).encode(),
+                                     {"Content-Type": "text/plain; charset=utf-8"}, state["etag"])
+        if status == 412:
+            fail(f"{path.name} was saved from the editor page just now. Run fetch, apply the edits, then share again.", 3)
+        if status != 200:
+            fail(f"uploading {path.name} failed: {describe(status, body)}")
+        state["etag"] = response["ETag"]
+        write_state_file(path, "base", text)
+        save_state(path, state)
+        verb = "Uploaded" if base is None else "Updated"
+        print(f"{verb} {path.name} ({len(text.encode()):,} bytes) at s3://{s3.bucket}/{state['key']}")
+    else:
+        print(f"S3 already has the current content of {path.name}")
+
+    # fresh links each time, so a shared file can be edited for the whole lifetime from now
+    links = {"name": path.name, "put": s3.url("PUT", state["key"]), "get": s3.url("GET", state["key"])}
+    template = (HERE / "editor.html").read_bytes().decode("utf-8")
+    page = template.replace("__SHARE__", json.dumps(links).replace("<", "\\u003c"))
+    status, _, body = s3.request("PUT", state["page"], body=page.encode("utf-8"),
+                                 headers={"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"})
+    if status != 200:
+        fail(f"uploading the editor page failed: {describe(status, body)}")
+    state["page_url"] = s3.url("GET", state["page"])
+    state["expires"] = int(time.time()) + s3.expires
+    save_state(path, state)
+    cleanup(s3, keep=state["folder"])
+
+    print()
+    print(f"NAME={path.name}")
+    print(f"EXPIRES={format_time(state['expires'])}")
+    print(f"PAGE_URL={state['page_url']}")
+
+
+def load_shared(path):
+    state = load_state(path)
+    if state is None:
+        fail(f"{path.name} is not shared. Share it first.")
+    return state
+
+
+def gone(path):
+    fail(f"the shared copy of {path.name} is gone, as it was stopped or cleaned up. Share it again for a new link.")
+
+
+def wait_for_save(s3, path, timeout):
+    """return once the copy on S3 differs from the one last fetched, or exit 2 when none comes in time"""
+    state = load_shared(path)
+    if is_unapplied(state, path, read_text(path)):
+        # fetch reports the edits still to apply right away
+        return
+    remaining = state["expires"] - time.time()
+    if remaining <= 0:
+        fail(f"the link for {path.name} has expired, so nothing more can be saved from the page. "
+             f"Share it again for a new link.")
+    timeout = min(timeout, remaining)
+    print(f"Waiting up to {round(timeout / 60)} min for {path.name} to be saved from the editor page...", flush=True)
+    deadline = time.time() + timeout
+    while True:
+        # read every time, as a fetch run meanwhile moves the ETag on
+        state = load_shared(path)
+        # keep waiting through network trouble and S3's own errors
+        try:
+            etag = current_etag(s3, state["key"])
+        except (urllib.error.URLError, OSError):
+            etag = state["etag"]
+        except S3Error as error:
+            if error.status < 500:
+                raise
+            etag = state["etag"]
+        if etag is None:
+            gone(path)
+        if etag != state["etag"]:
+            return
+        if time.time() > deadline:
+            print(f"Nothing was saved to {path.name} from the editor page within {round(timeout / 60)} min.")
+            sys.exit(2)
+        time.sleep(POLL_SECONDS)
+
+
+def fetch(s3, path):
+    state = load_shared(path)
+    text = read_text(path)
+    unapplied = is_unapplied(state, path, text)
+    if not unapplied and "unapplied" in state:
+        # the file changed since the last fetch, so those edits are in it, maybe with more changes
+        for name in ("unapplied", "conflicts", "fetched"):
+            state.pop(name, None)
+        save_state(path, state)
+    # until the last fetch is applied, newer edits are merged into it rather than into the file
+    current = read_state_file(path, "incoming") if unapplied else text
+
+    status, headers, body = s3.request("GET", state["key"], headers={"If-None-Match": state["etag"]})
+    if status == 404 or (status == 403 and current_etag(s3, state["key"]) is None):
+        gone(path)
+    if status not in (200, 304):
+        fail(f"fetching {path.name} failed: {describe(status, body)}")
+
+    if status == 200:
+        remote = to_local(body.decode("utf-8", errors="replace"), state["crlf"])
+        base = read_state_file(path, "base")
+        merged, conflicts = (remote, 0) if current == base else merge(current, base, remote)
+        state["etag"] = headers["ETag"]
+        write_state_file(path, "base", remote)
+        write_state_file(path, "incoming", merged)
+        saved = email.utils.parsedate_to_datetime(headers["Last-Modified"]).timestamp()
+        print(f"{path.name} was saved from the editor page at {format_time(saved)}.")
+        if merged != text:
+            state.update({"unapplied": file_marker(path, text), "conflicts": conflicts, "fetched": int(time.time())})
+        save_state(path, state)
+    elif unapplied:
+        merged = current
+        conflicts = state.get("conflicts", 0)
+        print(f"The edits fetched at {format_time(state['fetched'])} are not applied to {path.name} yet.")
+    else:
+        print(f"No edits to {path.name} were saved from the editor page since the last fetch.")
+        print()
+        print("CHANGED=0")
+        return
+
+    if merged == text:
+        print(f"{path.name} already holds those edits.")
+        print()
+        print("CHANGED=0")
+        return
+    print()
+    print_diff(path.name, text, merged)
+    print()
+    print("CHANGED=1")
+    print(f"CONFLICTS={conflicts}")
+    print(f"INCOMING={state_directory(path) / 'incoming'}")
+
+
+def show_status(path):
+    files =[state_directory(path) / "share.json"] if path else sorted(STATE.glob("*/share.json"))
+    shares = [json.loads(file.read_bytes()) for file in files if file.exists()]
+    if not shares:
+        print(f"{path.name} is not shared." if path else "No files are shared.")
+        return
+    s3 = S3()
+    for state in shares:
+        file = Path(state["path"])
+        etag = current_etag(s3, state["key"])
+        if etag is None:
+            edits = "its copy is gone from S3 (stopped or cleaned up)"
+        elif etag != state["etag"]:
+            edits = "edits saved from the page are waiting to be fetched"
+        elif file.is_file() and is_unapplied(state, file, read_text(file)):
+            edits = f"edits fetched at {format_time(state['fetched'])} are not applied yet"
+        else:
+            edits = "no edits waiting"
+        expired = state["expires"] < time.time()
+        print(f"{state['path']}: {edits}; the link {'expired' if expired else 'expires'} {format_time(state['expires'])}")
+        if not expired and etag is not None:
+            print(f"  PAGE_URL={state['page_url']}")
+
+
+def stop(path, discard):
+    state = load_state(path)
+    if state is None:
+        fail(f"{path.name} is not shared")
+    s3 = S3()
+    if not discard:
+        etag = current_etag(s3, state["key"])
+        if etag is not None and etag != state["etag"]:
+            fail(f"edits to {path.name} saved from the page are not fetched yet. Fetch and apply them, "
+                 f"or pass --discard to drop them.", 3)
+        if path.is_file() and is_unapplied(state, path, read_text(path)):
+            fail(f"the edits fetched at {format_time(state['fetched'])} are not applied to {path.name} yet. "
+                 f"Apply them, or pass --discard to drop them.", 3)
+    removed = purge(s3, state["folder"])
+    shutil.rmtree(state_directory(path))
+    print(f"Stopped sharing {path.name}: deleted its copy and editor page from S3 ({removed} objects).")
+
+
+def http_status(url, method="GET", body=None, headers=None):
+    request = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        return error.code
+
+
+def check():
+    """test the setup the way sharing uses it, in a folder of its own that it deletes again"""
+    failures = 0
+
+    def ok(message):
+        print(f"  ok    {message}")
+
+    def bad(message):
+        nonlocal failures
+        failures += 1
+        print(f"  FAIL  {message}")
+
+    def note(message):
+        print(f"  note  {message}")
+
+    print(f"Settings in {SETTINGS}:")
+    s3 = S3()
+    ok(f"bucket {s3.bucket} at {s3.origin} in {s3.region}, prefix {s3.prefix}/, links lasting {s3.expires} s")
+
+    print("S3:")
+    folder = f"{s3.prefix}/check-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}"
+    key = f"{folder}/check.txt"
+    status, headers, body = s3.request("PUT", key, body=b"edit-link check\n",
+                                       headers={"Content-Type": "text/plain; charset=utf-8"})
+    if status != 200:
+        bad(f"upload to s3://{s3.bucket}/{s3.prefix}/ failed: {describe(status, body)}; see iam-policy.json")
+        return failures
+    ok(f"upload to s3://{s3.bucket}/{s3.prefix}/")
+
+    url = s3.url("GET", key, expires=300)
+    status = http_status(url)
+    if status == 200:
+        ok("a signed link downloads")
+    else:
+        bad(f"a signed link gave HTTP {status}")
+    status = http_status(url.split("?")[0])
+    if status == 403:
+        ok("the link without its signature is refused")
+    else:
+        bad(f"the bucket served an unsigned link (HTTP {status}); block public access")
+
+    # saves first ask whether the file changed, which is how neither side overwrites edits it has not seen
+    status = http_status(url, headers={"If-None-Match": headers["ETag"]})
+    if status == 304:
+        ok("asking whether the file changed answers 304 Not Modified")
+    else:
+        bad(f"a GET with If-None-Match of the current ETag gave HTTP {status} rather than 304")
+
+    # If-Match on the save itself also closes the moment between that check and the save
+    put_url = s3.url("PUT", key, expires=300)
+    status = http_status(put_url, "PUT", b"stale\n", {"If-Match": '"00000000000000000000000000000000"'})
+    if status == 412:
+        ok("a save over a version it has not seen is refused (If-Match)")
+    elif status in (200, 501):
+        note("this service ignores If-Match, so a save landing within a moment of another can replace it")
+    else:
+        bad(f"a save with a wrong If-Match gave HTTP {status}")
+    status, _, body = put(s3, key, b"edit-link check\n", {"Content-Type": "text/plain; charset=utf-8"},
+                          current_etag(s3, key))
+    if status == 200:
+        ok("a save over the current version goes through")
+    else:
+        bad(f"a save over the current version failed: {describe(status, body)}")
+
+    try:
+        if current_etag(s3, key):
+            ok("listing finds the file")
+        else:
+            bad("listing does not find the file just uploaded")
+    except S3Error as error:
+        bad(f"{error}; see iam-policy.json")
+    removed = purge(s3, folder)
+    ok(f"deleting the test file ({removed} object)")
+    return failures
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="edit-link",
+                                     description="Share a text file for editing in a browser and fetch the edits.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    command = commands.add_parser("share", help="upload a file with an editor page, or update one already shared")
+    command.add_argument("file")
+    command = commands.add_parser("fetch", help="get the edits saved from the editor page")
+    command.add_argument("--wait", action="store_true", help="wait for a save from the page first")
+    command.add_argument("--timeout", type=float, default=3600, help="seconds to wait, 3600 unless given")
+    command.add_argument("file")
+    command = commands.add_parser("status", help="list shared files, or show one")
+    command.add_argument("file", nargs="?")
+    command = commands.add_parser("stop", help="delete a shared file's copy and editor page from S3")
+    command.add_argument("--discard", action="store_true", help="even when it has edits not fetched or applied")
+    command.add_argument("file")
+    commands.add_parser("check", help="test the settings, for setup --check")
+    arguments = parser.parse_args()
+
+    path = Path(arguments.file).expanduser().resolve() if getattr(arguments, "file", None) else None
+    try:
+        if arguments.command == "check":
+            sys.exit(1 if check() else 0)
+        if arguments.command == "share":
+            share(path)
+        elif arguments.command == "fetch":
+            s3 = S3()
+            if arguments.wait:
+                wait_for_save(s3, path, arguments.timeout)
+            fetch(s3, path)
+        elif arguments.command == "status":
+            show_status(path)
+        else:
+            stop(path, arguments.discard)
+    except urllib.error.URLError as error:
+        fail(f"could not reach S3: {error.reason}")
+    except S3Error as error:
+        fail(str(error))
+
+
+if __name__ == "__main__":
+    main()

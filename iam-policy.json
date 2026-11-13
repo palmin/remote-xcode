@@ -8,17 +8,30 @@
       "Resource": "arn:aws:s3:::YOUR-BUCKET"
     },
     {
-      "Sid": "ListOnlyThePrefix",
+      "Sid": "DeployIpaListsOnlyItsPrefix",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::YOUR-BUCKET",
       "Condition": { "StringLike": { "s3:prefix": ["deploy-ipa", "deploy-ipa/*"] } }
     },
     {
-      "Sid": "BuildsAndConsoleUploads",
+      "Sid": "DeployIpaBuildsAndConsoleUploads",
       "Effect": "Allow",
       "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
       "Resource": "arn:aws:s3:::YOUR-BUCKET/deploy-ipa/*"
+    },
+    {
+      "Sid": "EditLinkListsOnlyItsPrefix",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::YOUR-BUCKET",
+      "Condition": { "StringLike": { "s3:prefix": ["edit-link", "edit-link/*"] } }
+    },
+    {
+      "Sid": "EditLinkSharedFiles",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::YOUR-BUCKET/edit-link/*"
     }
   ]
 }

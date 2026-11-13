@@ -70,10 +70,33 @@ ARCHIVE="$WORK/$SCHEME.xcarchive"
 # linked into every target, so extensions upload their console output too
 if [ "$CONSOLE" = 1 ]; then
     CONSOLE_PREFIX="$DEPLOY_IPA_PREFIX/$NAME/console/$(date +%Y%m%d-%H%M%S)/"
+
+    # the build uploads with presigned POST, which not every S3 service takes, so try one before building
+    CONFIG=$(base64 -D <<<"$("$HERE/upload-policy" "$CONSOLE_PREFIX")")
+    FORM=()
+    while IFS= read -r FIELD; do FORM+=(--form-string "$FIELD"); done < <(jq -r '.fields | to_entries[] | "\(.key)=\(.value)"' <<<"$CONFIG")
+    STATUS=$(printf 'deploy-ipa console check\n' | curl -s -o /dev/null -w '%{http_code}' "${FORM[@]}" \
+        --form-string "key=${CONSOLE_PREFIX}check" -F "file=@-;filename=console.log" "$(jq -r .url <<<"$CONFIG")")
+    aws_ s3 rm "s3://$DEPLOY_IPA_BUCKET/${CONSOLE_PREFIX}check" --only-show-errors 2>/dev/null || true
+    if [ "$STATUS" != 204 ]; then
+        echo "Error: a console upload gave HTTP $STATUS. Console builds upload with presigned POST," >&2
+        echo "which this S3 service may not take; deploys without --console still work." >&2
+        exit 1
+    fi
+
     echo "Linking RemoteConsole, uploading to $CONSOLE_PREFIX..."
     "$HERE/build-console-object" iphoneos "$WORK/RemoteConsole.o" "$CONSOLE_PREFIX"
     echo "OTHER_LDFLAGS[sdk=iphoneos*] = \$(inherited) $WORK/RemoteConsole.o" > "$WORK/console.xcconfig"
     XCODE_ARGS+=(-xcconfig "$WORK/console.xcconfig")
+fi
+
+# xcodebuild -allowProvisioningUpdates on a locked Mac cannot read the Xcode account
+# credentials and removes every account from Xcode's settings, while the build still succeeds.
+# no pipe into grep -q: it exits at the first match, and pipefail turns ioreg's SIGPIPE into "unlocked"
+if [[ "$(ioreg -n Root -d1)" == *'"CGSSessionScreenIsLocked"=Yes'* ]]; then
+    echo "Error: the screen is locked, and building now would sign Xcode out of every developer account." >&2
+    echo "Unlock the Mac (e.g. with Screen Sharing) and run again." >&2
+    exit 1
 fi
 
 echo "Archiving $SCHEME ($CONFIGURATION) from $XCODE..."

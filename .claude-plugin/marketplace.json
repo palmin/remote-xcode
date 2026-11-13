@@ -1,11 +1,19 @@
 {
-  "name": "deploy-ipa",
+  "name": "remote-xcode",
   "owner": { "name": "Anders Borum" },
+  "metadata": {
+    "description": "Claude Code plugins for working on your Xcode projects from the Claude app on your phone, while Claude runs on your Mac"
+  },
   "plugins": [
     {
       "name": "deploy-ipa",
-      "source": "./",
+      "source": "./plugins/deploy-ipa",
       "description": "Build a debug iOS app, upload it to your own S3 bucket and tap the install link Claude replies with on your phone, optionally with its console output uploaded for Claude to read"
+    },
+    {
+      "name": "edit-link",
+      "source": "./plugins/edit-link",
+      "description": "Edit a file of your project by hand on your phone: Claude uploads it with an editor page to your own S3 bucket, replies with the link and brings what you save back into the file"
     }
   ]
 }

@@ -57,14 +57,14 @@ check_tools() {
     for tool in aws jq python3 curl xcodebuild plutil security zip ditto; do
         if command -v "$tool" >/dev/null; then ok "$tool"; else bad "$tool is missing"; fi
     done
-    # console builds use export-credentials, which arrived in aws CLI 2.9
+    # console builds use export-credentials from aws CLI 2.9, and other S3 services endpoint_url from 2.13
     if command -v aws >/dev/null; then
         local major="" minor=""
         read -r major minor < <(aws --version 2>&1 | sed -nE 's|^aws-cli/([0-9]+)\.([0-9]+).*|\1 \2|p') || true
-        if [ "${major:-0}" -gt 2 ] || { [ "${major:-0}" -eq 2 ] && [ "${minor:-0}" -ge 9 ]; }; then
+        if [ "${major:-0}" -gt 2 ] || { [ "${major:-0}" -eq 2 ] && [ "${minor:-0}" -ge 13 ]; }; then
             ok "aws CLI $major.$minor"
         else
-            bad "aws CLI 2.9 or later is needed, found ${major:-?}.${minor:-?} (brew install awscli)"
+            bad "aws CLI 2.13 or later is needed, found ${major:-?}.${minor:-?} (brew install awscli)"
         fi
     fi
 }
@@ -92,23 +92,29 @@ check() {
     for account in access-key-id secret-access-key; do
         if keychain_has "$account"; then ok "$account in the Keychain"; else bad "$account is not in the Keychain"; fi
     done
-    local identity region location
-    if identity=$(aws --profile "$profile" sts get-caller-identity --query Arn --output text 2>&1); then
-        ok "profile $profile signs in as $identity"
-    else
-        bad "profile $profile cannot sign in: $identity"
-        return
-    fi
+    local identity region location endpoint
     region=$(aws --profile "$profile" configure get region 2>/dev/null || true)
-    if location=$(aws --profile "$profile" s3api get-bucket-location --bucket "$bucket" --query LocationConstraint --output text 2>&1); then
-        if [ "$location" = None ]; then location=us-east-1; fi
-        if [ "$location" = "$region" ]; then
-            ok "bucket $bucket is in $region, as the profile says"
-        else
-            bad "bucket $bucket is in $location but profile $profile says ${region:-no region}"
-        fi
+    endpoint=$(aws --profile "$profile" configure get endpoint_url 2>/dev/null || true)
+    if [ -n "$endpoint" ]; then
+        # other S3 services have no STS to ask, so the upload below shows whether the keys work
+        ok "profile $profile uses $endpoint, region ${region:-not set}"
     else
-        note "could not read the region of $bucket ($location); signed links fail if it is not ${region:-set}"
+        if identity=$(aws --profile "$profile" sts get-caller-identity --query Arn --output text 2>&1); then
+            ok "profile $profile signs in as $identity"
+        else
+            bad "profile $profile cannot sign in: $identity"
+            return
+        fi
+        if location=$(aws --profile "$profile" s3api get-bucket-location --bucket "$bucket" --query LocationConstraint --output text 2>&1); then
+            if [ "$location" = None ]; then location=us-east-1; fi
+            if [ "$location" = "$region" ]; then
+                ok "bucket $bucket is in $region, as the profile says"
+            else
+                bad "bucket $bucket is in $location but profile $profile says ${region:-no region}"
+            fi
+        else
+            note "could not read the region of $bucket ($location); signed links fail if it is not ${region:-set}"
+        fi
     fi
 
     # a download link, the same link without its signature, and a console style upload
@@ -132,7 +138,13 @@ check() {
         target="$prefix/setup-check/console-$(date +%s).log"
         status=$(printf 'deploy-ipa setup check\n' | curl -s -o /dev/null -w '%{http_code}' "${form[@]}" \
             --form-string "key=$target" -F "file=@-;filename=console.log" "$(jq -r .url <<<"$config")")
-        if [ "$status" = 204 ]; then ok "console builds can upload"; else bad "console upload gave HTTP $status"; fi
+        if [ "$status" = 204 ]; then
+            ok "console builds can upload"
+        elif [ -n "$endpoint" ]; then
+            note "console uploads gave HTTP $status: this service may not take presigned POST, which only --console builds need"
+        else
+            bad "console upload gave HTTP $status"
+        fi
         aws --profile "$profile" s3 rm "s3://$bucket/$target" --only-show-errors 2>/dev/null || true
     else
         bad "upload-policy failed: $encoded"
@@ -145,7 +157,7 @@ interactive() {
     fi
     echo "deploy-ipa setup. Press return to keep the value in brackets."
     echo
-    echo "AWS keys of an IAM user that may only use your bucket (see iam-policy.json):"
+    echo "Keys that may use your bucket (on AWS, of an IAM user limited by iam-policy.json):"
     keychain_store access-key-id "access key id"
     keychain_store secret-access-key "secret access key"
     echo
@@ -155,17 +167,22 @@ interactive() {
     ask DEPLOY_IPA_PREFIX "Key prefix" "${DEPLOY_IPA_PREFIX:-deploy-ipa}"
     ask DEPLOY_IPA_PROFILE "Name of the aws profile" "${DEPLOY_IPA_PROFILE:-deploy-ipa}"
 
-    # signed links only work against the bucket's own region
-    local region=""
-    region=$(AWS_ACCESS_KEY_ID=$(security find-generic-password -s "$SERVICE" -a access-key-id -w) \
-             AWS_SECRET_ACCESS_KEY=$(security find-generic-password -s "$SERVICE" -a secret-access-key -w) \
-             aws s3api get-bucket-location --bucket "$DEPLOY_IPA_BUCKET" --region us-east-1 \
-                 --query LocationConstraint --output text 2>/dev/null || true)
-    if [ "$region" = None ]; then region=us-east-1; fi
-    if [ -n "$region" ]; then
-        echo "The bucket is in $region."
+    local endpoint="" region=""
+    endpoint=$(aws --profile "$DEPLOY_IPA_PROFILE" configure get endpoint_url 2>/dev/null || true)
+    echo "Leave the endpoint empty for AWS. For another S3 service, give its URL,"
+    echo "such as https://<account>.r2.cloudflarestorage.com or https://s3.<region>.backblazeb2.com."
+    ask endpoint "Endpoint" "$endpoint"
+
+    if [ -n "$endpoint" ]; then
+        ask region "Region, such as auto for Cloudflare R2" "us-east-1"
     else
-        ask region "Region of the bucket, such as eu-north-1"
+        # signed links only work against the bucket's own region, which AWS names to anyone asking
+        region=$(curl -sI "https://$DEPLOY_IPA_BUCKET.s3.amazonaws.com/" | tr -d '\r' | sed -n 's/^x-amz-bucket-region: //Ip')
+        if [ -n "$region" ]; then
+            echo "The bucket is in $region."
+        else
+            ask region "Region of the bucket, such as eu-north-1"
+        fi
     fi
 
     # outside the skill folder, which plugin updates replace
@@ -174,9 +191,18 @@ interactive() {
     chmod 755 "$HELPER"
     if grep -q "^\[profile $DEPLOY_IPA_PROFILE\]" "$AWS_CONFIG" 2>/dev/null; then
         echo "Profile $DEPLOY_IPA_PROFILE is already in $AWS_CONFIG and stays as it is."
+        if [ -n "$endpoint" ]; then
+            echo "Make sure it has endpoint_url = $endpoint and s3 addressing_style = path."
+        fi
     else
         mkdir -p "$(dirname "$AWS_CONFIG")"
-        printf '\n[profile %s]\nregion = %s\ncredential_process = "%s"\n' "$DEPLOY_IPA_PROFILE" "$region" "$HELPER" >> "$AWS_CONFIG"
+        {
+            printf '\n[profile %s]\nregion = %s\ncredential_process = "%s"\n' "$DEPLOY_IPA_PROFILE" "$region" "$HELPER"
+            # every S3 service takes path-style requests, while not all have the bucket as host name
+            if [ -n "$endpoint" ]; then
+                printf 'endpoint_url = %s\ns3 =\n    addressing_style = path\n' "$endpoint"
+            fi
+        } >> "$AWS_CONFIG"
         echo "Added profile $DEPLOY_IPA_PROFILE to $AWS_CONFIG."
     fi
 

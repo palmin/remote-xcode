@@ -59,7 +59,9 @@ and tests the AWS profile, bucket, signed links and console uploads.
    (itms-services) link. Link to the page, never to `INSTALL_URL`: the
    Claude app does not make itms-services links tappable, whether written
    as a markdown link, an autolink or a bare URL. A page left open in
-   Safari also makes it easy to retry.
+   Safari also makes it easy to retry. Don't make the page open the
+   itms-services link by itself on load: iOS then asks twice, which is
+   slower than tapping the button.
    Show the link again whenever the user asks for it.
 
 ## Console builds
@@ -110,6 +112,10 @@ console to the same bucket instead. Check which case applies before choosing.
   `DEPLOY_IPA_EXPIRES` (604800 s, the SigV4 maximum). Uploads land in
   `<prefix>/<scheme>/<version>-<build>-<timestamp>/`, and each run deletes
   everything under the prefix older than the link lifetime.
+- Requests go to AWS, or to the `endpoint_url` of the aws profile for another
+  S3 service, addressed path-style. Console builds also need the service to
+  take presigned POST uploads; `deploy-ipa --console` tries one before
+  building.
 - With automatic signing the archive is already signed for development, so
   the script zips the app into an .ipa itself. Only an archive without a
   device profile goes through `xcodebuild -exportArchive`, which spends
@@ -120,6 +126,13 @@ console to the same bucket instead. Check which case applies before choosing.
 
 ## When it fails
 
+- **"the screen is locked":** the script refuses to build on a locked Mac,
+  because xcodebuild then cannot read the Xcode account credentials and
+  silently removes every developer account from Xcode. Tell the user to
+  unlock the Mac, such as with Screen Sharing; do not work around the check.
+- **"a console upload gave HTTP …":** the S3 service takes no presigned POST
+  uploads, which console builds need. Deploy without `--console`, and read
+  the console over the Mac's network when the phone is on it.
 - `error: the following command failed with exit code 0` lines come from
   `xcodebuild -quiet` on files with warnings; trust the script's exit code.
 - **AWS errors:** run `${CLAUDE_SKILL_DIR}/setup --check` and pass on what

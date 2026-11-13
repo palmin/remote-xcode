@@ -1,0 +1,6 @@
+{
+  "name": "edit-link",
+  "description": "Edit a file of your project by hand on your phone: Claude uploads it with an editor page to your own S3 bucket, replies with the link and brings what you save back into the file",
+  "version": "1.0.0",
+  "author": { "name": "Anders Borum" }
+}
