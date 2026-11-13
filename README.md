@@ -22,25 +22,6 @@ file. The waits for the build and for Claude are sped up.
 
 <img width="360" height="778" alt="remote-xcode-demo-360" src="https://github.com/user-attachments/assets/febf2123-c6c5-491c-856e-1806015082b7" />
 
-## deploy-ipa
-
-Ask Claude to "deploy MyApp to my phone". It archives the scheme, uploads a
-development-signed .ipa to your bucket, and replies with a link to a page
-with an Install button. You tap the link right there in the conversation on
-the phone you test on, and it stays there for later. Ask for "a build that
-uploads its logging" instead, and the build also streams its `print` and
-`NSLog` output to the bucket, where Claude reads it while you reproduce a bug.
-
-## edit-link
-
-Ask Claude to "let me edit the TestFlight notes". It uploads the file with an
-editor page to your bucket and replies with a link. You edit on the phone and
-tap Save, and within seconds Claude applies your change to the file as an
-ordinary edit, so you see it as a diff in the conversation. When Claude
-changes the file meanwhile, an open page shows the new version, and when you
-both changed it, the two are merged with conflicts marked, so neither side
-overwrites the other.
-
 ## What you need
 
 - A Mac running Claude Code, which you drive from the Claude app through
@@ -80,30 +61,28 @@ as a personal skill.
    `YOUR-BUCKET` replaced, leaving out the `DeployIpa` or `EditLink`
    statements of a plugin you don't use, and changing `deploy-ipa` or
    `edit-link` in it if you pick other prefixes.
-3. **Run setup in your own Terminal**, for each plugin. Ask Claude to "set
-   up deploy-ipa" or "set up edit-link" to get the exact path, which depends
-   on how you installed it, then run it yourself:
+3. **Run setup in your own Terminal** for each plugin. Ask Claude to "set
+   up deploy-ipa" or "set up edit-link" for the path, then run:
 
    ```bash
    <skill folder>/setup
    ```
 
-   It stores the keys in your login Keychain, typed into macOS's own prompt,
-   so they never pass through Claude, and asks for the bucket and, for
-   other services than AWS, the endpoint. It writes
-   `~/.config/deploy-ipa.env` or `~/.config/edit-link.env`. deploy-ipa's
-   also copies a small Keychain helper to `~/.config/deploy-ipa/aws-credentials`
-   and adds a profile to `~/.aws/config` for the `aws` CLI. With deploy-ipa
-   set up, edit-link's setup offers to use the same keys and bucket, so you
-   type them only once. Then it checks everything: a signed download, that
-   the same link without its signature is refused, and what each plugin
-   needs on top (console uploads for deploy-ipa; the change checks saves
-   rely on, listing and deleting for edit-link).
+   It asks for the bucket, the endpoint for services other than AWS, and the
+   keys, which you type into macOS's own prompt so they go straight into
+   your Keychain and never pass through Claude. Then it checks that
+   everything works. edit-link's setup offers to reuse deploy-ipa's keys and
+   bucket.
 
-Run `setup --check` at any time to repeat the checks without changing
-anything; Claude runs it too when something fails.
+`setup --check` repeats the checks without changing anything; Claude runs it
+when something fails.
 
 ## Use deploy-ipa
+
+Claude archives the scheme, uploads a development-signed .ipa to your bucket
+and replies with a link to an install page, which stays in the conversation.
+A build that uploads its logging also streams `print` and `NSLog` output to
+the bucket, for Claude to read while you reproduce a bug.
 
 - "Deploy MyApp to my phone", or `/deploy-ipa:deploy-ipa MyApp`
 - "Send a Release build of MyApp to my iPhone"
@@ -113,17 +92,20 @@ anything; Claude runs it too when something fails.
 - "Watch the MyApp console live while I try this"
 - "I'm on the same Wi-Fi, install it directly and watch the console"
 
-Links last 7 days. Console output arrives 2 to 5 seconds late, with the time
-and process name on each line, and the app and each of its extensions upload
-their own. From a device, only `print` and `NSLog` come through, because
-reading the log store for `Logger` lines takes seconds there; so add
-temporary debug lines as `NSLog` or `print`.
+Links last 7 days. Console output arrives 2 to 5 seconds late, from the app
+and each of its extensions. From a device only `print` and `NSLog` come
+through, so add temporary debug lines with those.
 
-The Mac must be unlocked while it builds. On a locked Mac, `xcodebuild`
-cannot read the Xcode account and signs Xcode out of every developer account,
-so deploy-ipa refuses to start; unlock it with Screen Sharing, for instance.
+The Mac must be unlocked while it builds: on a locked Mac, `xcodebuild` signs
+Xcode out of every developer account, so deploy-ipa refuses to start.
 
 ## Use edit-link
+
+Claude uploads the file with an editor page to your bucket and replies with
+the link. When you tap Save, Claude applies your change to the file as an
+ordinary edit, so you see it as a diff in the conversation. When the file
+also changed on the Mac, the two are merged with conflicts marked, so
+neither side overwrites the other.
 
 - "Let me edit the TestFlight notes on my phone", or `/edit-link:edit-link notes.txt`
 - "Give me a link to edit Config.xcconfig"
@@ -131,31 +113,20 @@ so deploy-ipa refuses to start; unlock it with Screen Sharing, for instance.
 - "Show me the edit link again"
 - "I'm done with the notes"
 
-Links last 7 days. After sharing, Claude waits up to an hour for your saves
-and picks each one up within about 3 seconds; after that, tell it when you
-saved. The page takes UTF-8 text up to 2 MB, follows dark mode, and keeps
-iOS from zooming in. Typing on an iPhone can bring curly quotes, which Claude
-points out in code and config files rather than keeping silently.
+Links last 7 days. For an hour after sharing, Claude picks up each save
+within seconds; after that, tell it when you saved.
 
 ## What leaves your Mac
 
-- The secret key never does. Install and edit links are presigned URLs,
-  which carry the access key id and a signature. They appear in the
-  conversation, so anyone who can read the transcript can use them until they
-  expire after 7 days: download the build, or read and change the shared
-  file. A development-signed .ipa installs only on devices registered with
-  your team.
-- A console build contains a signed upload policy instead of a key. Anyone
-  holding the binary can upload files of up to 10 MB under that build's own
-  console folder until the policy expires with the links, but cannot read,
-  list or delete anything.
-- An edit page holds links that read and replace that one file and nothing
-  else. When you are done, Claude stops sharing it, which deletes the copy
-  from the bucket.
-- Each deploy deletes everything under its prefix older than the link
-  lifetime, and each share deletes the shares nothing was saved to for that
-  long, so give each plugin a prefix of its own. In a versioned bucket,
-  deleted and replaced versions stay until a lifecycle rule removes them.
+- The secret key never does. Install and edit links carry only the key id
+  and a signature, and anyone who can read the conversation can use them
+  until they expire after 7 days. An edit link reaches only its one file.
+- A console build holds a signed upload policy, not a key: anyone with the
+  binary can upload up to 10 MB into that build's console folder until it
+  expires, but not read, list or delete anything.
+- Old builds and unused shares are deleted after 7 days, and a share also as
+  soon as you stop it, so give each plugin a prefix of its own. A versioned
+  bucket keeps old versions until a lifecycle rule removes them.
 
 ## Limits
 
