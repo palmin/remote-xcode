@@ -15,6 +15,13 @@ S3 service with presigned links, and can share one bucket and key. Nothing is
 added to your Xcode projects, and nothing runs on anyone's server but your
 own bucket.
 
+In this recording, the Claude app on an iPhone drives Claude Code on a Mac.
+Claude deploys a debug build of FTP Files to the phone, then shares the
+app's TestFlight notes for editing in Safari and applies the edit to the
+file. The waits for the build and for Claude are sped up.
+
+<!-- drop the GIF here -->
+
 ## deploy-ipa
 
 Ask Claude to "deploy MyApp to my phone". It archives the scheme, uploads a
